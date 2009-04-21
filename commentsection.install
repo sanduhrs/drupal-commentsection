@@ -1,0 +1,20 @@
+<?php
+/* $Id$ */
+
+function commentsection_install() {
+  
+  switch ($GLOBALS['db_type']) {
+    case 'mysql':
+    case 'mysqli':
+      db_query("CREATE TABLE {commentsection} (
+          nid int(10) NOT NULL default '0',
+          vid int(10) NOT NULL default '0',
+          url varchar(255) NOT NULL default '',
+          PRIMARY KEY  (vid)
+        ) TYPE=MyISAM /*!40100 DEFAULT CHARACTER SET utf8 */;"
+      );
+      break;
+    case 'pgsql':
+      break;
+  }
+}

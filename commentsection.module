@@ -1,0 +1,595 @@
+<?php
+// $Id$
+
+/**
+ * @file
+ *
+ * @author
+ * Stefan Auditor <stefan.auditor@erdfisch.de>
+ *
+ * Add CCK support
+ */
+
+/**
+ * Implementation of hook_requirements().
+ */
+function commentsection_requirements($phase) {
+  $requirement = array();
+  // Ensure translations don't break at install time
+  $t = get_t();
+
+  if ($phase == 'install') {
+    $requirement['php'] = array(
+      'title' => t('PHP 5'),
+      'value' => phpversion(),
+      'description' => t('The SimpleXML extension requires PHP 5. The Commentsection module requires SimpleXML.'),
+      'severity' => version_compare(phpversion(), '5', '>=') ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+    );
+    $requirement['simplexml'] = array(
+      'title' => t('SimpleXML'),
+      'value' => phpversion('simplexml') ? phpversion('simplexml') : t('Not loaded.'),
+      'description' => t('The SimpleXML extension provides a very simple and easily usable toolset to convert XML to an object that can be processed with normal property selectors and array iterators. This extension is required by Commentsection module.'),
+      'severity' => phpversion('simplexml') ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+    );
+  }
+
+  return $requirement;
+}
+
+/**
+ * Implementation of hook_menu();
+ */
+function commentsection_menu($may_cache) {
+  global $user;
+  $items = array();
+
+  if ($may_cache) {
+    $items[] = array(
+      'path' => 'admin/settings/commentsection',
+      'title' => t('Commentsection'),
+      'description' => t('Configure the default Commentsection settings.'),
+      'callback' => 'drupal_get_form',
+      'callback arguments' => 'commentsection_settings',
+      'access' => user_access('administer commentsection'),
+    );
+    $items[] = array(
+      'path' => 'commentsection',
+      'callback' => 'commentsection_page',
+      'access' => TRUE,
+      'type' => MENU_CALLBACK,
+    );
+  }
+  else {
+    if (module_exists('commentrss')) {
+      $items[] = array(
+        'path' => 'crss/commentsection',
+        'callback' => 'commentsection_rss',
+        'access' => TRUE,
+        'type' => MENU_CALLBACK,
+      );
+    }
+  }
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_node_info().
+ */
+function commentsection_node_info() {
+  return array(
+    'commentsection' => array(
+      'name' => t('Commentsection'),
+      'module' => 'commentsection',
+      'description' => t("commentsection."),
+    )
+  );
+}
+
+/**
+ * Implementation of hook_access().
+ */
+function commentsection_access($op, $node) {
+  global $user;
+
+  if ($op == 'create') {
+    return user_access('create commentsection');
+  }
+
+  if ($op == 'update' || $op == 'delete') {
+    if (user_access('edit own commentsection') && ($user->uid == $node->uid)) {
+      return TRUE;
+    }
+  }
+}
+
+/**
+ * Implementation of hook_perm().
+ */
+function commentsection_perm() {
+  return array('create commentsection', 'edit own commentsection', 'administer commentsection');
+}
+
+/**
+ * Implementation of hook_form().
+ */
+function commentsection_form(&$node) {
+  $type = node_get_types('type', $node);
+
+  $form['title'] = array(
+    '#type' => 'textfield',
+    '#title' => check_plain($type->title_label),
+//     '#required' => TRUE,
+    '#default_value' => $node->title,
+    '#weight' => -5,
+    '#description' => t('If no !title is provided, we try to supplement it automatically. Press the %preview button to see the suggestion.', array('!title' => check_plain($type->title_label), '%preview' => t('Preview'))),
+  );
+  $form['url'] = array(
+    '#type' => 'textfield',
+    '#title' => t('URL'),
+    '#required' => TRUE,
+    '#default_value' => $node->url ? $node->url : variable_get('commentsection_base', ''),
+  );
+  $form['body_filter']['body'] = array(
+    '#type' => 'textarea',
+    '#title' => check_plain($type->body_label),
+    '#default_value' => $node->body,
+    '#required' => FALSE,
+    '#description' => t('If no !body is provided, we try to supplement it automatically. Press the %preview button to see the suggestion.', array('!body' => check_plain($type->body_label), '%preview' => t('Preview'))),
+  );
+  $form['body_filter']['filter'] = filter_form($node->format);
+
+  return $form;
+}
+
+/**
+ * Implementation of hook_insert().
+ */
+function commentsection_insert($node) {
+  db_query("INSERT INTO {commentsection} (vid, nid, url) VALUES (%d, %d, '%s')", $node->vid, $node->nid, $node->url);
+  if (module_exists('commentrss')) {
+    path_set_alias('crss/node/'. $node->nid, 'crss/commentsection/url'. str_replace(variable_get('commentsection_base', 'crss'), '', $node->url));
+  }
+}
+
+function commentsection_nodeapi(&$node, $op, $a3 = NULL, $a4 = NULL) {
+  if ($node->type == 'commentsection') {
+    switch ($op) {
+      case 'insert':
+        if (module_exists('blog_reactions')) {
+          blog_reactions_update($node->nid, $node->url);
+        }
+        break;
+      case 'validate':
+        $type = node_get_types('type', $node);
+
+        //Craft URLs
+        $url_base   = $a3['url']['#value'] ? check_plain($a3['url']['#value']) : check_plain($a3['url']['#default_value']);
+        $url_source = str_replace(variable_get('commentsection_base', ''), variable_get('commentsection_source', ''), $url_base);
+        //Retrieve data
+        $data = drupal_http_request($url_source);
+        //Parse data
+        if ($data->code == '200') {
+          $xml = commentsection_parse_xml($data->data);
+          if (!($xml['indicator'] == '1' or $xml['indicator'] == 'yes')) {          	
+            drupal_not_found();
+            exit;
+          }
+        }
+        //Autodetect encoding
+        $encoding = FALSE;
+        if (variable_get('commentsection_encode', 0)) {
+          $encoding = commentsection_discover_encoding($data->headers);
+        }
+
+        //Set title
+        if (empty($a3['title']['#value'])) {
+          form_set_value($a3['title'], $encoding ? commentsection_encode($xml['title']) : $xml['title']);
+        }
+        //Set body
+        if (empty($a3['body_filter']['body']['#value'])) {
+          $body = $encoding ? commentsection_encode($xml['body']) : $xml['body'];
+          $body .= $encoding ? '<p class="commentsection_author">'. commentsection_encode($xml['byline']) .'</p>' : '<p class="commentsection_author">'. $xml['byline'] .'</p>';
+          form_set_value($a3['body_filter']['body'], $encoding ? commentsection_encode($body) : $body);
+        }
+        //Set date
+        if (empty($a3['author']['date']['#value'])) {
+          //Craft date
+          $date = $xml['date'];
+          if (substr($date, 2, 1) != '.') $date = '0'. $date;
+          if (substr($date, 5, 1) != '.') $date = substr($date, 0, 3) .'0'. substr($date, 3, strlen($date));
+          $date = substr($date, 6, 4) .'-'. substr($date, 3, 2) .'-'. substr($date, 0, 2) .' '. substr($date, (strlen($date)-5), strlen($date));
+          $date = strtotime($date);
+          $date = format_date($date, 'custom', 'Y-m-d H:i:s O');
+          form_set_value($a3['author']['date'], $date);
+        }
+        //Set Author
+        if (empty($a3['author']['name']['#value'])) {
+          //Try to load original author
+          if (variable_get('commentsection_original_author', 1)) {
+            $name = $encoding ? commentsection_encode($xml['author']) : $xml['author'];
+            $account = user_load(array('name' => check_plain($name)));
+          }
+          //Not found use fallback
+          if (empty($account->name)) {
+            $account->name = variable_get('commentsection_default_author', '');
+          }
+          form_set_value($a3['author']['name'], $account->name);
+        }
+        //Set path
+        if (module_exists('path') AND variable_get('commentsection_path', 1)) {
+          form_set_value($a3['path'], 'commentsection/url'. str_replace(variable_get('commentsection_base', ''), '', $url_base));
+        }
+
+        break;
+    }
+  }
+}
+
+/**
+ * Implementation of hook_update().
+ */
+function commentsection_update($node) {
+  // if this is a new node or we're adding a new revision,
+  if ($node->revision) {
+    commentsection_insert($node);
+  }
+  else {
+    db_query("UPDATE {commentsection} SET url = '%s' WHERE vid = %d", $node->url, $node->vid);
+  }
+}
+
+/**
+ * Implementation of hook_delete().
+ */
+function commentsection_delete($node) {
+  db_query('DELETE FROM {commentsection} WHERE nid = %d', $node->nid);
+}
+
+/**
+ * Implementation of hook_load().
+ */
+function commentsection_load($node) {
+  $additions = db_fetch_object(db_query('SELECT url FROM {commentsection} WHERE vid = %d', $node->vid));
+  return $additions;
+}
+
+/**
+ * Implementation of hook_view().
+ */
+function commentsection_view($node, $teaser = FALSE, $page = FALSE) {
+  $node = node_prepare($node, $teaser);
+  $node->content['commentsection'] = array(
+    '#value' => theme('commentsection_source', $node),
+    '#weight' => 1,
+  );
+
+  return $node;
+}
+
+/**
+ * Theme the base source URL
+ */
+function theme_commentsection_source($node) {
+  $output = "\n".'<cite class="commentsection_source">';
+  $output .= l($node->url, $node->url);
+  $output .= '</cite>'."\n";
+  return $output;
+}
+
+/**
+ * Automatically create a node for a given URL
+ */
+function commentsection_page() {
+  global $user;
+
+  //craft url
+  $url_base = variable_get('commentsection_base', '');
+  for ($i=2;arg($i);$i++) {
+    $url_alias .= '/'. check_plain(arg($i));
+  }
+  $url_base .= $url_alias;
+  $url_source = str_replace(variable_get('commentsection_base', ''), variable_get('commentsection_source', ''), $url_base);
+
+  //check for node in case of changed/unset path
+  if ($node = db_fetch_object(db_query("SELECT nid FROM {commentsection} WHERE url='$url_base'"))) {
+    drupal_goto('node/'. $node->nid);
+    exit;
+  }
+
+  
+  
+  $data = drupal_http_request($url_source);
+  if ($data->code == '200') {
+    $xml = commentsection_parse_xml($data->data);
+    if (!($xml['indicator'] == 'yes' or $xml['indicator'] == '1')) {
+    	
+      drupal_not_found();
+      exit;
+    }
+  }
+  else {
+    drupal_not_found();
+    exit;
+  }
+
+  $node->type   = 'commentsection';
+  $node->title  = $encoding ? commentsection_encode($xml['title']) : $xml['title'];
+  $node->teaser = $encoding ? commentsection_encode($xml['body']) : $xml['body'];
+  $node->body   = $encoding ? commentsection_encode($xml['body']) : $xml['body'];
+  $node->body  .= $encoding ? '<p class="commentsection_author">'. commentsection_encode($xml['byline']) .'</p>' : '<p class="commentsection_author">'. $xml['byline'] .'</p>';
+
+  //Craft date
+  $date = $xml['date'];
+  if (substr($date, 2, 1) != '.') $date = '0'. $date;
+  if (substr($date, 5, 1) != '.') $date = substr($date, 0, 3) .'0'. substr($date, 3, strlen($date));
+  $date = substr($date, 6, 4) .'-'. substr($date, 3, 2) .'-'. substr($date, 0, 2) .' '. substr($date, (strlen($date)-5), strlen($date));
+  $date = strtotime($date);
+//   $date = format_date($date, 'custom', 'Y-m-d H:i:s O');
+  $node->created = $date;
+  $node->url = $url_base;
+  $node->path = 'commentsection/url'. $url_alias;
+
+  $node_options  = variable_get('node_options_commentsection', array());
+  $node->status  = in_array('status', $node_options)  ? 1 : 0;
+  $node->promote = in_array('promote', $node_options) ? 1 : 0;
+  $node->sticky  = in_array('sticky', $node_options)  ? 1 : 0;
+  $node->comment = variable_get('comment_commentsection', 2);
+  $node->format  = FILTER_FORMAT_DEFAULT;
+
+  //TODO: define user
+  if (variable_get('commentsection_original_author', FALSE)) {
+    $author = user_load(array('name' => ($encoding ? commentsection_encode($xml['author']) : $xml['author'])));
+  }
+  if (($authorname = variable_get('commentsection_default_author', NULL)) AND !$author->uid) {
+    $author = user_load(array('name' => $authorname));
+  }
+  $node->uid     = $author->uid ? $author->uid : 0;
+
+  //remember user
+//   $account = $user;
+  //switch to admin account
+//   $user = user_load(array('uid' => 1));
+  //save node
+  node_save($node);
+  //save taxonomy
+  taxonomy_node_save($node->nid, $terms);
+  if (is_array($xml['taxonomy'])) {
+    foreach ($xml['taxonomy'] as $value) {
+      $taxonomy .= $encoding ? commentsection_encode($value) : $value;
+      $taxonomy .= ',';
+    }
+  }
+  $taxonomy = substr($taxonomy, 0, (strlen($taxonomy)-1));
+  if ($vid = variable_get('commentsection_vocab', 0)) {
+    $terms['tags'] = array($vid => $taxonomy);
+    taxonomy_node_save($node->nid, $terms);
+  }
+
+  //set path alias
+  if (module_exists('commentrss')) {
+    path_set_alias('crss/node/'. $node->nid, 'crss/commentsection/url'. $url_alias);
+  }
+
+  //goto new node
+  if ($node) {
+    drupal_goto('node/'.$node->nid);
+  }
+  else {
+    drupal_not_found();
+  }
+
+  exit;
+}
+
+/**
+ * Settings page
+ */
+function commentsection_settings() {
+  $form['commentsection_base'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Base URL'),
+    '#default_value' => variable_get('commentsection_base', ''),
+  );
+   $form['commentsection_source'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XML URL'),
+    '#default_value' => variable_get('commentsection_source', ''),
+  );
+  $form['commentsection_xpath_indicator'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to publish indicator'),
+    '#default_value' => variable_get('commentsection_xpath_indicator', ''),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first result will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_xpath_title'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to title'),
+    '#default_value' => variable_get('commentsection_xpath_title', '//title'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first result will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_xpath_body'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to body'),
+    '#default_value' => variable_get('commentsection_xpath_body', '//body'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first result will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_xpath_date'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to date'),
+    '#default_value' => variable_get('commentsection_xpath_date', '//date'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first result will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_xpath_author'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to author'),
+    '#default_value' => variable_get('commentsection_xpath_author', '//author'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first result will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_original_author'] = array(
+    '#type' => 'radios',
+    '#title' => t('Original author'),
+    '#default_value' => variable_get('commentsection_original_author', 1),
+    '#options' => array(0 => 'deactivated', 1 => 'activated'),
+    '#description' => t("Use the original author as user if availlable. As fallback you should define a %default_author below.", array('%default_author' => t('Default author'))),
+  );
+  $form['commentsection_default_author'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Default author'),
+    '#default_value' => variable_get('commentsection_default_author', ''),
+    '#autocomplete_path' => 'user/autocomplete',
+    '#description' => t('Provide a default author, who will be the author of automatically published nodes. If not provided the author will be %anonymous', array('%anonymous' => variable_get('anonymous', t('anonymous')))),
+  );
+  $form['commentsection_xpath_taxonomy'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to taxonomy terms'),
+    '#default_value' => variable_get('commentsection_xpath_taxonomy', '//keyword'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first results will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $form['commentsection_xpath_byline'] = array(
+    '#type' => 'textfield',
+    '#title' => t('XPath to Byline'),
+    '#default_value' => variable_get('commentsection_xpath_byline', '//byline'),
+    '#description' => t('You may provide multiple XPaths expressions seperated by the | operator. The first results will be used. For further XPath instructions have a look at !url', array('!url' => l('w3schools.com', 'http://www.w3schools.com/xpath/xpath_syntax.asp'))),
+  );
+  $vocs[] = '<'. t('none') .'>';
+  foreach (taxonomy_get_vocabularies('commentsection') as $vid => $voc) {
+    $vocs[$vid] = $voc->name;
+  }
+  $form['commentsection_vocab'] = array(
+    '#type' => 'select',
+    '#multiple' => false,
+    '#title' => t('Vocabulary'),
+    '#default_value' => variable_get('commentsection_vocab', 0),
+    '#options' => $vocs,
+    '#description' => t('Select the vocabulary to use with commentsection nodes.'),
+  );
+  $form['commentsection_encode'] = array(
+    '#type' => 'radios',
+    '#title' => t('Charset detection'),
+    '#default_value' => variable_get('commentsection_encode', 0),
+    '#options' => array(0 => 'deactivated', 1 => 'activated'),
+    '#description' => t('Try to detect the charset and encode in UTF-8.'),
+  );
+  if (module_exists('path')) {
+    $form['commentsection_path'] = array(
+      '#type' => 'radios',
+      '#title' => t('Automatic path'),
+      '#default_value' => variable_get('commentsection_path', 1),
+      '#options' => array(0 => 'deactivated', 1 => 'activated'),
+      '#description' => t('Automatically create a path based on the provided url.'),
+    );
+  }
+
+  return system_settings_form($form);
+}
+
+/**
+ * Retrieve external content
+ */
+function commentsection_retrieve($url) {
+  $data = drupal_http_request($url);
+
+  if ($data->code == '200') {
+    $array = commentsection_parse_xml($data->data);
+    return $array;
+  }
+
+  return FALSE;
+}
+
+/**
+ * Parse XML data
+ */
+function commentsection_parse_xml($xml) {
+
+  $indicator = variable_get('commentsection_xpath_indicator', '');
+  if (empty($indicator)) {
+    $data['indicator']  = 1;
+  }
+  else {
+    $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_indicator', ''));
+    $data['indicator']  = $element[0];
+  }
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_title', '//title'));
+  $data['title']  = $element[0];
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_body', '//body'));
+  $data['body']   = $element[0];
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_date', '//date'));
+  $data['date']   = $element[0];
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_author', '//author'));
+  $data['author'] = $element[0];
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_taxonomy', '//keyword'));
+  $data['taxonomy'] = $element;
+  $element = commentsection_get_xpath($xml, variable_get('commentsection_xpath_byline', '//byline'));
+  $data['byline'] = $element[0];
+
+  return $data;
+}
+
+/**
+ * Finds the all values of an defined XPath expression.
+ * For further XPath instructions look at
+ * http://www.w3schools.com/xpath/xpath_syntax.asp
+ * and http://php.net/simplexml
+ */
+function commentsection_get_xpath($xml, $xpath) {
+  $xml = new SimpleXMLElement($xml);
+
+  foreach ($xml->xpath($xpath) as $element) {
+    $element = (string)$element;
+    if (!empty($element)) {
+      $data[] = trim($element);
+    }
+  }
+
+  return $data;
+}
+
+/**
+ * Automatically discovers the content type from a given response header
+ */
+function commentsection_discover_encoding($headers) {
+  if (!empty($headers['content-type'])) {
+    $content_type = $headers['content-type'];
+  }
+  elseif (!empty($headers['Content-type'])) {
+    $content_type = $headers['Content-type'];
+  }
+  elseif (!empty($headers['Content-Type'])) {
+    $content_type = $headers['Content-Type'];
+  }
+
+  $content_type = str_replace('"', '', $content_type);
+  $pieces = explode('=', $content_type);
+//   drupal_set_message('Encoding: '. $pieces[1]);//DEBUG
+  return trim($pieces[1]);
+}
+
+/**
+ * Encode strings to UTF-8
+ */
+function commentsection_encode($string, $encoding = 'ISO-8859-1') {
+  if (function_exists('mb_convert_encoding')) {
+    $string = mb_convert_encoding($string, 'UTF-8', $encoding);
+  }
+  elseif (function_exists('iconv')) {
+    $string = iconv($encoding, 'UTF-8', $string);
+  }
+  elseif (function_exists('recode_string')) {
+    $string = recode_string($encoding .'..UTF-8', $string);
+  }
+
+  return $string;
+}
+
+/**
+ * Implementation of hook_blog_reactions().
+ */
+function commentsection_blog_reactions($op, $data) {
+  if ($op == 'request') {
+    $url = db_result(db_query("SELECT url FROM {commentsection} WHERE nid=%d", $data['nid']));
+    $data['uri'] = $url ? $url : '';
+  }
+  return $data;
+}

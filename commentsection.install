@@ -1,20 +1,47 @@
 <?php
-/* $Id$ */
+// $Id$
 
+/**
+ * Implementation of hook_install().
+ */
 function commentsection_install() {
-  
-  switch ($GLOBALS['db_type']) {
-    case 'mysql':
-    case 'mysqli':
-      db_query("CREATE TABLE {commentsection} (
-          nid int(10) NOT NULL default '0',
-          vid int(10) NOT NULL default '0',
-          url varchar(255) NOT NULL default '',
-          PRIMARY KEY  (vid)
-        ) TYPE=MyISAM /*!40100 DEFAULT CHARACTER SET utf8 */;"
-      );
-      break;
-    case 'pgsql':
-      break;
-  }
+  drupal_install_schema('commentsection');
 }
+
+/**
+ * Implementation of hook_schema().
+ */
+function commentsection_schema() {
+  $schema['commentsection'] = array(
+    'fields' => array(
+      'nid' => array(
+        'description' => 'The primary identifier for a node.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0),
+      'vid' => array(
+        'description' => 'The current {node_revisions}.vid version identifier.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0),
+      'url' => array(
+        'description' => '',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => ''),
+    ),
+    'primary keys' => array('vid'),
+  );
+  return $schema;
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function commentsection_uninstall() {
+  drupal_uninstall_schema('commentsection');
+}
+

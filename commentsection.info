@@ -1,5 +1,7 @@
 ; $Id$
 name = Commentsection
 description = Commentsection.
-dependencies = path taxonomy
+dependencies[] = path
+dependencies[] = taxonomy
+core = 6.x
 ;package = 

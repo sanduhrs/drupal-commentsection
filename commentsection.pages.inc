@@ -1,5 +1,4 @@
 <?php
-// $Id$
 
 /**
  * Automatically create a node for a given URL

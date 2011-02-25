@@ -1,4 +1,3 @@
-; $Id$
 name = Commentsection
 description = Commentsection.
 dependencies[] = path

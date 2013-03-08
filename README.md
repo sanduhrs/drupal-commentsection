@@ -14,7 +14,6 @@ Drupal 5.x
 INSTALLING
 ----------
 1. To install the module copy the 'commentsection' folder to your sites/all/modules directory.
-
 2. Read more about installing modules at http://drupal.org/node/70151
 
 

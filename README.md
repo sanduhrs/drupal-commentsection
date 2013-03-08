@@ -5,15 +5,11 @@ http://drupal.org/project/commentsection
 
 DESCRIPTION
 -----------
-
+Allows for lazy import of external content.
 
 REQUIREMENTS
 ------------
 Drupal 5.x
-
-CLIENTSIDE REQUIREMENTS
-------------------------
-Allows for lazy import of external content.
 
 INSTALLING
 ----------

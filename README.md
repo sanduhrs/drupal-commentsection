@@ -8,7 +8,7 @@ Description
 Allows for lazy import of external content.
 
 ## Requirements
-Drupal 5.x
+Drupal 6.x
 
 ## Installation
 1. To install the module copy the 'commentsection' folder to your sites/all/modules directory.

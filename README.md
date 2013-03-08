@@ -13,7 +13,7 @@ Drupal 5.x
 
 CLIENTSIDE REQUIREMENTS
 ------------------------
-
+Allows for lazy import of external content.
 
 INSTALLING
 ----------

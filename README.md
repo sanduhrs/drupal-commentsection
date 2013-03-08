@@ -3,8 +3,7 @@ Drupal Commentsection Module
 http://drupal.org/project/commentsection
 
 
-Description
------------
+## Description
 Allows for lazy import of external content.
 
 ## Requirements
